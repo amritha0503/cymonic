@@ -1,0 +1,132 @@
+.main {
+  min-height: 100vh;
+  background-color: var(--bg-color);
+}
+
+.header {
+  padding: 1rem 0;
+  border-bottom: 1px solid var(--border-color);
+  background: var(--surface-color);
+}
+
+.backBtn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  border-radius: var(--radius-md);
+  transition: background-color 0.2s;
+  color: var(--text-secondary);
+}
+
+.backBtn:hover {
+  background-color: var(--bg-color);
+  color: var(--text-primary);
+}
+
+.headerUser {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  font-weight: 500;
+  color: var(--text-secondary);
+}
+
+.avatar {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  background-color: var(--primary-color);
+  color: white;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 600;
+  font-size: 0.875rem;
+}
+
+.toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 1.5rem;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+
+.searchBar {
+  position: relative;
+  flex: 1;
+  max-width: 400px;
+}
+
+.searchIcon {
+  position: absolute;
+  left: 1rem;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--text-secondary);
+}
+
+.searchInput {
+  padding-left: 2.75rem;
+}
+
+.filters {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.tableResponsive {
+  overflow-x: auto;
+}
+
+.table {
+  width: 100%;
+  border-collapse: collapse;
+  text-align: left;
+}
+
+.table th,
+.table td {
+  padding: 1.25rem 1.5rem;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.table th {
+  background-color: rgba(0, 0, 0, 0.02);
+  font-weight: 600;
+  color: var(--text-secondary);
+  font-size: 0.875rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.table tr:last-child td {
+  border-bottom: none;
+}
+
+.table tr:hover {
+  background-color: rgba(0, 0, 0, 0.01);
+}
+
+@media (prefers-color-scheme: dark) {
+  .table th {
+    background-color: rgba(255, 255, 255, 0.02);
+  }
+  .table tr:hover {
+    background-color: rgba(255, 255, 255, 0.01);
+  }
+}
+
+.rowHighlight {
+  background-color: rgba(245, 158, 11, 0.03);
+}
+
+@media (prefers-color-scheme: dark) {
+  .rowHighlight {
+    background-color: rgba(245, 158, 11, 0.05);
+  }
+}
