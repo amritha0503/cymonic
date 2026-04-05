@@ -20,12 +20,37 @@ CREATE TABLE IF NOT EXISTS claims (
   ai_reason TEXT,
   policy_excerpt TEXT,
   ai_confidence DECIMAL(5,2),
+
+  -- Email Notification Fields
+  email_sent_at TIMESTAMP WITH TIME ZONE,
+  email_error TEXT,
   
   -- Manual Override Fields
   override_comment TEXT,
   overridden_at TIMESTAMP WITH TIME ZONE,
   
   created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+ALTER TABLE claims ENABLE ROW LEVEL SECURITY;
+
+-- Employees can read only their own claims
+CREATE POLICY "Employees read own claims"
+ON claims
+FOR SELECT
+USING (auth.uid() = employee_id);
+
+-- Auditors can read all claims
+CREATE POLICY "Auditors read all claims"
+ON claims
+FOR SELECT
+USING (
+  EXISTS (
+    SELECT 1
+    FROM public.profiles p
+    WHERE p.id = auth.uid()
+      AND p.role = 'auditor'
+  )
 );
 
 -- 2. Policy Chunks Table
@@ -37,6 +62,24 @@ CREATE TABLE IF NOT EXISTS policy_chunks (
   content TEXT NOT NULL,
   embedding VECTOR(768) -- Gemini embedding dimensions
 );
+
+-- 4. Notifications Table
+-- Stores per-employee notifications for manual overrides and status updates.
+CREATE TABLE IF NOT EXISTS notifications (
+  id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+  employee_id UUID NOT NULL,
+  claim_id UUID,
+  message TEXT NOT NULL,
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+ALTER TABLE notifications ENABLE ROW LEVEL SECURITY;
+
+-- Employees can read only their own notifications
+CREATE POLICY "Employees read own notifications"
+ON notifications
+FOR SELECT
+USING (auth.uid() = employee_id);
 
 -- 3. Match Policy RPC (Remote Procedure Call)
 -- This is the Postgres Function Next.js or edge functions will call via `supabase.rpc('match_policy')`.

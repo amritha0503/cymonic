@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import Link from "next/link";
 import { UploadCloud, FileText, ArrowLeft, Loader2, CheckCircle2, AlertTriangle, Check, Clock, XCircle } from "lucide-react";
 import { useRouter } from "next/navigation";
@@ -27,37 +27,106 @@ export default function EmployeePortal() {
   
   const [ocrData, setOcrData] = useState<OCRData | null>(null);
   const [errorMsg, setErrorMsg] = useState("");
+  const [employeeEmail, setEmployeeEmail] = useState("");
+  const [employeeName, setEmployeeName] = useState("");
+  const [employeeId, setEmployeeId] = useState("");
+
+  const [notifications, setNotifications] = useState<
+    { id: string; message: string; createdAt: string }[]
+  >([]);
 
   const [myClaims, setMyClaims] = useState<any[]>([]);
   const router = useRouter();
+  const channelRef = useRef<ReturnType<typeof supabase.channel> | null>(null);
 
-  const fetchClaims = async () => {
+  const fetchClaims = async (userId: string) => {
+    if (!userId) return;
     const { data } = await supabase
       .from('claims')
       .select('*')
+      .eq('employee_id', userId)
       .order('created_at', { ascending: false })
       .limit(5);
     if (data) setMyClaims(data);
   };
 
-  useEffect(() => {
-    fetchClaims();
-
-    // Listen for realtime updates to simulate Notification System
-    const channel = supabase
-      .channel('schema-db-changes')
-      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'claims' }, (payload: any) => {
-        fetchClaims();
-        // Trigger a dashboard alert when a claim gets audited or overridden
-        if (payload.new && payload.new.status) {
-           alert(`Notification: A claim's status has been updated to ${payload.new.status.toUpperCase()}!`);
-        }
-      })
-      .subscribe();
-      
-    return () => {
-      supabase.removeChannel(channel);
+  const fetchNotifications = async (userId: string) => {
+    if (!userId) return;
+    const { data } = await supabase
+      .from('notifications')
+      .select('*')
+      .eq('employee_id', userId)
+      .order('created_at', { ascending: false })
+      .limit(10);
+    if (data) {
+      setNotifications(
+        data.map((note) => ({
+          id: note.id,
+          message: note.message,
+          createdAt: note.created_at,
+        }))
+      );
     }
+  };
+
+  useEffect(() => {
+    let isActive = true;
+
+    const loadProfile = async () => {
+      const {
+        data: { user },
+      } = await supabase.auth.getUser();
+
+      if (!user || !isActive) return;
+
+      setEmployeeId(user.id || "");
+      setEmployeeEmail(user.email || "");
+
+      const { data: profile } = await supabase
+        .from('profiles')
+        .select('username')
+        .eq('id', user.id)
+        .single();
+
+      if (profile?.username) {
+        setEmployeeName(profile.username);
+      }
+
+      fetchClaims(user.id);
+      fetchNotifications(user.id);
+
+      if (channelRef.current) {
+        supabase.removeChannel(channelRef.current);
+        channelRef.current = null;
+      }
+
+      const channelName = `notifications-${user.id}-${Math.random().toString(36).slice(2)}`;
+      const channel = supabase.channel(channelName);
+      channel.on(
+        'postgres_changes',
+        { event: 'INSERT', schema: 'public', table: 'notifications', filter: `employee_id=eq.${user.id}` },
+        (payload: any) => {
+          fetchClaims(user.id);
+          const createdAt = payload.new?.created_at || new Date().toISOString();
+          const message = String(payload.new?.message || "Notification received.");
+          setNotifications((prev) => [{ id: payload.new?.id || `${createdAt}-${Math.random()}`, message, createdAt }, ...prev].slice(0, 10));
+          alert(`Notification: ${message}`);
+        }
+      );
+      channel.subscribe();
+
+      channelRef.current = channel;
+    };
+
+    loadProfile();
+
+    return () => {
+      isActive = false;
+      if (channelRef.current) {
+        supabase.removeChannel(channelRef.current);
+        channelRef.current = null;
+      }
+    };
   }, []);
 
   const handleSignOut = async () => {
@@ -119,6 +188,15 @@ export default function EmployeePortal() {
       formData.append('file', file);
       formData.append('purpose', purpose);
       formData.append('date', claimedDate);
+      if (employeeEmail) {
+        formData.append('employee_email', employeeEmail);
+      }
+      if (employeeId) {
+        formData.append('employee_id', employeeId);
+      }
+      if (employeeName) {
+        formData.append('employee_name', employeeName);
+      }
       if (ocrData) {
         formData.append('merchant', ocrData.merchant || 'Unknown');
         formData.append('amount', ocrData.total_amount?.toString() || '0');
@@ -132,7 +210,7 @@ export default function EmployeePortal() {
       if (!res.ok) throw new Error('Upload failed');
       
       setIsSuccess(true);
-      fetchClaims();
+      fetchClaims(employeeId);
     } catch (error) {
       console.error(error);
       setErrorMsg('Failed to submit claim');
@@ -148,6 +226,11 @@ export default function EmployeePortal() {
       case 'rejected': return <span className="badge badge-danger"><XCircle size={12} style={{marginRight: '4px'}}/> Rejected</span>;
       default: return <span className="badge" style={{backgroundColor: 'var(--border-color)', color: 'var(--text-primary)'}}><Clock size={12} style={{marginRight: '4px'}}/> Pending</span>;
     }
+  };
+
+  const getFinalStatus = (claim: any) => {
+    if (claim?.overridden_at && claim?.status) return claim.status;
+    return claim?.ai_status || 'pending';
   };
 
   return (
@@ -331,6 +414,24 @@ export default function EmployeePortal() {
           </div>
         )}
 
+        <div className="card" style={{ marginBottom: '2rem' }}>
+          <h2 style={{ marginBottom: '1.5rem', borderBottom: '1px solid var(--border-color)', paddingBottom: '1rem' }}>Notifications</h2>
+          {notifications.length === 0 ? (
+            <p style={{ color: 'var(--text-secondary)' }}>No updates yet. Status changes will appear here.</p>
+          ) : (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
+              {notifications.map((note) => (
+                <div key={note.id} style={{ padding: '0.75rem 1rem', border: '1px solid var(--border-color)', borderRadius: '10px', background: 'var(--bg-secondary)' }}>
+                  <div style={{ fontWeight: 600 }}>{note.message}</div>
+                  <div style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>
+                    {new Date(note.createdAt).toLocaleString()}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
         <div className="card">
           <h2 style={{ marginBottom: '1.5rem', borderBottom: '1px solid var(--border-color)', paddingBottom: '1rem' }}>My Recent Claims Status</h2>
           {myClaims.length === 0 ? (
@@ -352,7 +453,7 @@ export default function EmployeePortal() {
                         <div style={{ fontWeight: 500 }}>{claim.business_purpose || 'Expense'}</div>
                         <div style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>${claim.amount || '0.00'}</div>
                       </td>
-                      <td style={{ padding: '0.75rem 0', textAlign: 'right' }}>{getStatusBadge(claim.ai_status || 'pending')}</td>
+                      <td style={{ padding: '0.75rem 0', textAlign: 'right' }}>{getStatusBadge(getFinalStatus(claim))}</td>
                     </tr>
                   ))}
                </tbody>

@@ -16,9 +16,16 @@ export async function POST(req: Request) {
     const merchant = formData.get('merchant') as string;
     const amount = formData.get('amount') as string;
     const date = formData.get('date') as string;
+    const employeeEmail = formData.get('employee_email') as string;
+    const employeeName = formData.get('employee_name') as string;
+    const employeeId = formData.get('employee_id') as string;
 
     if (!file || !purpose) {
       return NextResponse.json({ error: 'Missing required fields' }, { status: 400 });
+    }
+
+    if (!employeeId) {
+      return NextResponse.json({ error: 'Missing employee ID' }, { status: 400 });
     }
 
     const fileBuffer = Buffer.from(await file.arrayBuffer());
@@ -46,6 +53,9 @@ export async function POST(req: Request) {
     const { data: claimData, error: insertError } = await supabaseAdmin
       .from('claims')
       .insert({
+        employee_id: employeeId || null,
+        employee_email: employeeEmail || null,
+        employee_name: employeeName || null,
         business_purpose: purpose,
         date: date || new Date().toISOString().split('T')[0],
         merchant: merchant || 'Unknown',

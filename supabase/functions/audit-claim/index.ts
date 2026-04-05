@@ -149,7 +149,23 @@ Output strict JSON: { "status": "approved"|"flagged"|"rejected", "reason": "Gene
       })
       .eq('id', claimId);
 
-    // 7. Could also trigger Resend Email directly via fetch() to resend API here
+    // 7. Create a persistent notification for the employee dashboard
+    if (claim.employee_id && auditData.status) {
+      const statusLabel = String(auditData.status || "pending").toUpperCase();
+      const reasonText = auditData.reason ? ` Reason: ${auditData.reason}` : "";
+      const message = `AI status update: claim ${String(claimId).slice(0, 8)} is ${statusLabel}.${reasonText}`;
+      const { error: notificationError } = await supabase
+        .from('notifications')
+        .insert({
+          employee_id: claim.employee_id,
+          claim_id: claimId,
+          message,
+        });
+
+      if (notificationError) {
+        console.error("Notification insert failed", notificationError);
+      }
+    }
 
     return new Response(JSON.stringify({ success: true, verdict: auditData }), {
       headers: { "Content-Type": "application/json" },

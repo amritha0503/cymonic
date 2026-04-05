@@ -13,6 +13,11 @@ export default function FinanceDashboard() {
   const [loading, setLoading] = useState(true);
   const router = useRouter();
 
+  const getFinalStatus = (claim: any) => {
+    if (claim?.overridden_at && claim?.status) return claim.status;
+    return claim?.ai_status || 'pending';
+  };
+
   useEffect(() => {
     async function fetchClaims() {
       // In production, we fetch real claims ordered by latest
@@ -23,8 +28,8 @@ export default function FinanceDashboard() {
       
       if (data) {
         const riskWeights: Record<string, number> = { 'flagged': 1, 'rejected': 2, 'pending': 3, 'approved': 4 };
-        const sortedData = data.sort((a, b) => 
-          (riskWeights[a.ai_status || 'pending'] || 5) - (riskWeights[b.ai_status || 'pending'] || 5) || 
+        const sortedData = data.sort((a, b) =>
+          (riskWeights[getFinalStatus(a)] || 5) - (riskWeights[getFinalStatus(b)] || 5) ||
           new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
         );
         setClaims(sortedData);
@@ -41,7 +46,7 @@ export default function FinanceDashboard() {
   };
 
 
-  const filteredClaims = claims.filter(claim => filter === "all" || (claim.ai_status || 'pending') === filter);
+  const filteredClaims = claims.filter(claim => filter === "all" || getFinalStatus(claim) === filter);
 
   const getStatusBadge = (status: string) => {
     switch(status) {
@@ -120,7 +125,7 @@ export default function FinanceDashboard() {
                       <td>{claim.date || new Date(claim.created_at).toLocaleDateString()}</td>
                       <td>{claim.merchant || 'N/A'}</td>
                       <td style={{ fontWeight: 600 }}>${claim.amount || '0.00'}</td>
-                      <td>{getStatusBadge(claim.ai_status || 'pending')}</td>
+                      <td>{getStatusBadge(getFinalStatus(claim))}</td>
                       <td>
                         <Link href={`/finance/claims/${claim.id}`} className="btn btn-secondary" style={{ padding: '0.25rem 0.75rem', fontSize: '0.875rem' }}>
                           Review

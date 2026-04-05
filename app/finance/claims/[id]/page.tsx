@@ -35,17 +35,14 @@ export default function ClaimDetail({ params }: { params: { id: string } }) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ claimId: claim.id, newStatus: status, comment: overrideComment })
     });
-    
-    if (res.ok) {
-       // Refresh locally
-       const { data } = await supabase
-         .from('claims')
-         .select('*')
-         .eq('id', params.id)
-         .single();
-       if (data) setClaim(data);
+
+    const payload = await res.json().catch(() => ({}));
+
+    if (res.ok && payload?.claim) {
+      setClaim(payload.claim);
+      setOverrideComment("");
     } else {
-       alert("Failed to override claim.");
+      alert(payload?.error || "Failed to override claim.");
     }
   };
 
