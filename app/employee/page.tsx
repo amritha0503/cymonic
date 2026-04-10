@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect, useRef } from "react";
+import { createWorker, PSM, type Worker } from "tesseract.js";
 import Link from "next/link";
 import { UploadCloud, FileText, ArrowLeft, Loader2, CheckCircle2, AlertTriangle, Check, Clock, XCircle } from "lucide-react";
 import { useRouter } from "next/navigation";
@@ -15,6 +16,23 @@ type OCRData = {
   quality_check: string;
 };
 
+type Claim = {
+  id: string;
+  employee_id: string | null;
+  employee_name: string | null;
+  employee_email: string | null;
+  amount: number | null;
+  date: string | null;
+  merchant: string | null;
+  business_purpose: string | null;
+  ai_status: string | null;
+  ai_reason: string | null;
+  status: string | null;
+  override_comment: string | null;
+  overridden_at: string | null;
+  created_at: string;
+};
+
 export default function EmployeePortal() {
   const [file, setFile] = useState<File | null>(null);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
@@ -26,6 +44,7 @@ export default function EmployeePortal() {
   const [isSuccess, setIsSuccess] = useState(false);
   
   const [ocrData, setOcrData] = useState<OCRData | null>(null);
+  const [ocrText, setOcrText] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState("");
   const [employeeEmail, setEmployeeEmail] = useState("");
   const [employeeName, setEmployeeName] = useState("");
@@ -35,9 +54,27 @@ export default function EmployeePortal() {
     { id: string; message: string; createdAt: string }[]
   >([]);
 
-  const [myClaims, setMyClaims] = useState<any[]>([]);
+  const [myClaims, setMyClaims] = useState<Claim[]>([]);
   const router = useRouter();
   const channelRef = useRef<ReturnType<typeof supabase.channel> | null>(null);
+  const ocrWorkerRef = useRef<Promise<Worker> | null>(null);
+
+  const getOcrWorker = () => {
+    if (!ocrWorkerRef.current) {
+      ocrWorkerRef.current = (async () => {
+        const worker = await createWorker('eng', undefined, {
+          workerPath: 'https://unpkg.com/tesseract.js@5/dist/worker.min.js',
+          corePath: 'https://unpkg.com/tesseract.js-core@5/tesseract-core.wasm.js',
+          langPath: 'https://tessdata.projectnaptha.com/4.0.0',
+        });
+        await worker.setParameters({
+          tessedit_pageseg_mode: PSM.SINGLE_BLOCK,
+        });
+        return worker;
+      })();
+    }
+    return ocrWorkerRef.current;
+  };
 
   const fetchClaims = async (userId: string) => {
     if (!userId) return;
@@ -47,25 +84,46 @@ export default function EmployeePortal() {
       .eq('employee_id', userId)
       .order('created_at', { ascending: false })
       .limit(5);
-    if (data) setMyClaims(data);
+    if (data) setMyClaims(data as Claim[]);
   };
 
-  const fetchNotifications = async (userId: string) => {
+  const buildNotificationMessage = (claim: Claim) => {
+    if (claim?.overridden_at && claim?.status) {
+      const note = claim.override_comment ? ` Comment: ${claim.override_comment}` : "";
+      return `Manual override: claim ${String(claim.id).slice(0, 8)} is ${String(claim.status).toUpperCase()}.${note}`;
+    }
+    if (claim?.ai_status) {
+      const reason = claim.ai_reason ? ` Reason: ${claim.ai_reason}` : "";
+      return `AI status update: claim ${String(claim.id).slice(0, 8)} is ${String(claim.ai_status).toUpperCase()}.${reason}`;
+    }
+    return null;
+  };
+
+  const fetchNotificationsFromClaims = async (userId: string) => {
     if (!userId) return;
     const { data } = await supabase
-      .from('notifications')
-      .select('*')
+      .from('claims')
+      .select('id, ai_status, ai_reason, status, override_comment, overridden_at, created_at')
       .eq('employee_id', userId)
       .order('created_at', { ascending: false })
-      .limit(10);
+      .limit(20);
+
     if (data) {
-      setNotifications(
-        data.map((note) => ({
-          id: note.id,
-          message: note.message,
-          createdAt: note.created_at,
-        }))
-      );
+      const mapped = data
+        .map((claim) => {
+          const typedClaim = claim as Claim;
+          const message = buildNotificationMessage(typedClaim);
+          if (!message) return null;
+          return {
+            id: String(typedClaim.id),
+            message,
+            createdAt: typedClaim.overridden_at || typedClaim.created_at,
+          };
+        })
+        .filter(Boolean) as { id: string; message: string; createdAt: string }[];
+
+      mapped.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+      setNotifications(mapped.slice(0, 10));
     }
   };
 
@@ -93,24 +151,34 @@ export default function EmployeePortal() {
       }
 
       fetchClaims(user.id);
-      fetchNotifications(user.id);
+      fetchNotificationsFromClaims(user.id);
 
       if (channelRef.current) {
         supabase.removeChannel(channelRef.current);
         channelRef.current = null;
       }
 
-      const channelName = `notifications-${user.id}-${Math.random().toString(36).slice(2)}`;
+      const channelName = `claims-updates-${user.id}-${Math.random().toString(36).slice(2)}`;
       const channel = supabase.channel(channelName);
       channel.on(
         'postgres_changes',
-        { event: 'INSERT', schema: 'public', table: 'notifications', filter: `employee_id=eq.${user.id}` },
-        (payload: any) => {
+        { event: 'UPDATE', schema: 'public', table: 'claims', filter: `employee_id=eq.${user.id}` },
+        (payload: unknown) => {
+          const change = payload as { new: Claim; old: Claim | null };
           fetchClaims(user.id);
-          const createdAt = payload.new?.created_at || new Date().toISOString();
-          const message = String(payload.new?.message || "Notification received.");
-          setNotifications((prev) => [{ id: payload.new?.id || `${createdAt}-${Math.random()}`, message, createdAt }, ...prev].slice(0, 10));
-          alert(`Notification: ${message}`);
+          fetchNotificationsFromClaims(user.id);
+
+          const hasManualOverride =
+            change.new?.overridden_at && change.new?.overridden_at !== change.old?.overridden_at;
+          const aiStatusChanged = change.new?.ai_status && change.new?.ai_status !== change.old?.ai_status;
+
+          if (hasManualOverride || aiStatusChanged) {
+            const claim = hasManualOverride
+              ? change.new
+              : { ...change.new, status: null, override_comment: null, overridden_at: null };
+            const message = buildNotificationMessage(claim) || "Notification received.";
+            alert(`Notification: ${message}`);
+          }
         }
       );
       channel.subscribe();
@@ -140,6 +208,7 @@ export default function EmployeePortal() {
       const selectedFile = e.target.files[0];
       setFile(selectedFile);
       setOcrData(null); // Reset when file changes
+      setOcrText(null);
       setErrorMsg("");
       if (selectedFile.type.startsWith('image/')) {
         setPreviewUrl(URL.createObjectURL(selectedFile));
@@ -157,18 +226,24 @@ export default function EmployeePortal() {
     setErrorMsg("");
     
     try {
-      const formData = new FormData();
-      formData.append('file', file);
-      
+      if (!file.type.startsWith('image/')) {
+        throw new Error('Only image files are supported for OCR');
+      }
+      const worker = await getOcrWorker();
+      const ocrResult = await worker.recognize(file);
+      const extractedText = ocrResult?.data?.text || '';
+      setOcrText(extractedText);
+
       const res = await fetch('/api/ocr', {
         method: 'POST',
-        body: formData,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ocrText: extractedText }),
       });
       
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Failed to extract data');
+      const responseData = await res.json();
+      if (!res.ok) throw new Error(responseData.error || 'Failed to extract data');
       
-      setOcrData(data.data);
+      setOcrData(responseData.data);
     } catch (error: any) {
       console.error(error);
       setErrorMsg(error.message);
@@ -201,6 +276,9 @@ export default function EmployeePortal() {
         formData.append('merchant', ocrData.merchant || 'Unknown');
         formData.append('amount', ocrData.total_amount?.toString() || '0');
       }
+      if (ocrText) {
+        formData.append('ocr_text', ocrText);
+      }
       
       const res = await fetch('/api/upload', {
         method: 'POST',
@@ -228,7 +306,7 @@ export default function EmployeePortal() {
     }
   };
 
-  const getFinalStatus = (claim: any) => {
+  const getFinalStatus = (claim: Claim) => {
     if (claim?.overridden_at && claim?.status) return claim.status;
     return claim?.ai_status || 'pending';
   };
@@ -258,7 +336,7 @@ export default function EmployeePortal() {
               Your expense has been successfully uploaded and is pending AI audit. You will be notified shortly.
             </p>
             <button className="btn btn-primary" onClick={() => { 
-              setIsSuccess(false); setFile(null); setPreviewUrl(null); setPurpose(""); setClaimedDate(""); setOcrData(null); 
+              setIsSuccess(false); setFile(null); setPreviewUrl(null); setPurpose(""); setClaimedDate(""); setOcrData(null); setOcrText(null);
             }}>
               Submit Another
             </button>
@@ -380,7 +458,7 @@ export default function EmployeePortal() {
                          </tr>
                          <tr style={{ borderBottom: '1px solid var(--border-color)' }}>
                            <th style={{ padding: '0.75rem 0', color: 'var(--text-secondary)' }}>Total Amount</th>
-                           <td style={{ padding: '0.75rem 0', fontWeight: 500 }}>{ocrData.total_amount ? `${ocrData.total_amount} ${ocrData.currency || ''}` : 'Not found'}</td>
+                           <td style={{ padding: '0.75rem 0', fontWeight: 500 }}>{ocrData.total_amount ? `Rs. ${ocrData.total_amount} ${ocrData.currency || 'INR'}` : 'Not found'}</td>
                          </tr>
                          <tr>
                            <th style={{ padding: '0.75rem 0', color: 'var(--text-secondary)' }}>Business Purpose</th>
@@ -451,7 +529,7 @@ export default function EmployeePortal() {
                       <td style={{ padding: '0.75rem 0' }}>{new Date(claim.created_at).toLocaleDateString()}</td>
                       <td style={{ padding: '0.75rem 0' }}>
                         <div style={{ fontWeight: 500 }}>{claim.business_purpose || 'Expense'}</div>
-                        <div style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>${claim.amount || '0.00'}</div>
+                        <div style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>Rs. {claim.amount || '0.00'}</div>
                       </td>
                       <td style={{ padding: '0.75rem 0', textAlign: 'right' }}>{getStatusBadge(getFinalStatus(claim))}</td>
                     </tr>

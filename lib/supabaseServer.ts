@@ -3,8 +3,8 @@ import type { NextRequest, NextResponse } from 'next/server';
 
 type CookieCallbacks = {
   get: (name: string) => string | undefined;
-  set: (name: string, value: string, options: any) => void;
-  remove: (name: string, options: any) => void;
+  set: (name: string, value: string, options: Record<string, unknown>) => void;
+  remove: (name: string, options: Record<string, unknown>) => void;
 };
 
 export function createSupabaseServerClient(

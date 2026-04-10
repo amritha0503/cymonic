@@ -8,24 +8,47 @@ import { supabase } from "@/lib/supabase";
 
 export default function ClaimDetail({ params }: { params: { id: string } }) {
   const [overrideComment, setOverrideComment] = useState("");
-  const [claim, setClaim] = useState<any>(null);
+  const [claim, setClaim] = useState<Record<string, unknown> | null>(null);
   const [loading, setLoading] = useState(true);
+  const [auditEvents, setAuditEvents] = useState<Record<string, unknown>[]>([]);
+
+  const refreshClaim = async () => {
+    const { data, error } = await supabase
+      .from('claims')
+      .select('*')
+      .eq('id', params.id)
+      .single();
+
+    if (data) {
+      setClaim(data as Record<string, unknown>);
+    }
+    if (error) console.error("Fetch Claim Error:", error);
+
+    const { data: events, error: eventsError } = await supabase
+      .from('audit_events')
+      .select('*')
+      .eq('claim_id', params.id)
+      .order('created_at', { ascending: false });
+
+    if (events) {
+      setAuditEvents(events as Record<string, unknown>[]);
+    }
+    if (eventsError) console.error("Fetch Audit Events Error:", eventsError);
+  };
 
   useEffect(() => {
-    async function fetchClaim() {
-      const { data, error } = await supabase
-        .from('claims')
-        .select('*')
-        .eq('id', params.id)
-        .single();
-        
-      if (data) {
-        setClaim(data);
-      }
-      if (error) console.error("Fetch Claim Error:", error);
+    const load = async () => {
+      await refreshClaim();
       setLoading(false);
-    }
-    fetchClaim();
+    };
+
+    load();
+
+    const interval = setInterval(() => {
+      refreshClaim();
+    }, 10000);
+
+    return () => clearInterval(interval);
   }, [params.id]);
 
   const handleOverride = async (status: 'approved' | 'rejected') => {
@@ -33,14 +56,15 @@ export default function ClaimDetail({ params }: { params: { id: string } }) {
     const res = await fetch('/api/override', { 
       method: 'POST', 
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ claimId: claim.id, newStatus: status, comment: overrideComment })
+      body: JSON.stringify({ claimId: claim?.id, newStatus: status, comment: overrideComment })
     });
 
     const payload = await res.json().catch(() => ({}));
 
     if (res.ok && payload?.claim) {
-      setClaim(payload.claim);
+      setClaim(payload.claim as Record<string, unknown>);
       setOverrideComment("");
+      await refreshClaim();
     } else {
       alert(payload?.error || "Failed to override claim.");
     }
@@ -94,32 +118,32 @@ export default function ClaimDetail({ params }: { params: { id: string } }) {
                   />
                 ) : (
                   <div className={styles.mockReceipt}>
-                     <h3>{claim.merchant || "Unknown"}</h3>
-                     <p>{claim.date || new Date(claim.created_at).toLocaleDateString()}</p>
+                     <h3>{(claim.merchant as string) || "Unknown"}</h3>
+                     <p>{(claim.date as string) || new Date(claim.created_at as string).toLocaleDateString()}</p>
                      <br/>
                      <p>Receipt digitally processed.</p>
                      <p>Line items requested via OCR.</p>
                      <br/>
-                     <h3 style={{ borderTop: '1px solid currentColor', paddingTop: '0.5rem' }}>Total: ${claim.amount || '0.00'}</h3>
+                     <h3 style={{ borderTop: '1px solid currentColor', paddingTop: '0.5rem' }}>Total: Rs. {claim.amount || '0.00'}</h3>
                   </div>
                 )}
               </div>
               <div className={styles.dataExtract}>
                 <div className={styles.dataItem}>
                   <span className={styles.dataLabel}>Merchant</span>
-                  <span className={styles.dataValue}>{claim.merchant || 'N/A'}</span>
+                  <span className={styles.dataValue}>{(claim.merchant as string) || 'N/A'}</span>
                 </div>
                 <div className={styles.dataItem}>
                   <span className={styles.dataLabel}>Date</span>
-                  <span className={styles.dataValue}>{claim.date || new Date().toLocaleDateString()}</span>
+                  <span className={styles.dataValue}>{(claim.date as string) || new Date().toLocaleDateString()}</span>
                 </div>
                 <div className={styles.dataItem}>
                   <span className={styles.dataLabel}>Amount</span>
-                  <span className={styles.dataValue}>${claim.amount || '0.00'}</span>
+                  <span className={styles.dataValue}>Rs. {claim.amount || '0.00'}</span>
                 </div>
                 <div className={styles.dataItem} style={{ gridColumn: '1 / -1' }}>
                   <span className={styles.dataLabel}>Business Purpose</span>
-                  <span className={styles.dataValue}>{claim.business_purpose || claim.purpose || 'No purpose supplied.'}</span>
+                  <span className={styles.dataValue}>{(claim.business_purpose as string) || (claim.purpose as string) || 'No purpose supplied.'}</span>
                 </div>
               </div>
             </div>
@@ -130,6 +154,9 @@ export default function ClaimDetail({ params }: { params: { id: string } }) {
              {claim.ai_status === null || claim.ai_status === undefined || !claim.ai_reason ? (
                 <div className="card" style={{ marginBottom: '1.5rem' }}>
                  <h2>Pending AI Evaluation...</h2>
+                 <button className="btn btn-secondary" style={{ marginTop: '1rem' }} onClick={refreshClaim}>
+                   Refresh status
+                 </button>
                 </div>
              ) : (
               <div className="card" style={{ marginBottom: '1.5rem', borderColor: claim.ai_status === 'flagged' || claim.ai_status === 'rejected' ? 'var(--warning-color)' : 'var(--success-color)' }}>
@@ -160,7 +187,7 @@ export default function ClaimDetail({ params }: { params: { id: string } }) {
               {claim.override_comment ? (
                 <div style={{ padding: '1rem', backgroundColor: 'var(--bg-color)', borderRadius: 'var(--radius-md)' }}>
                   <p><strong>Overridden by Finance:</strong></p>
-                  <p>"{claim.override_comment}"</p>
+                  <p>{claim.override_comment}</p>
                 </div>
               ) : (
                 <div className={styles.overrideForm}>
@@ -191,6 +218,27 @@ export default function ClaimDetail({ params }: { params: { id: string } }) {
                   {!overrideComment && claim.status !== 'approved' && (
                     <p style={{ fontSize: '0.875rem', color: 'var(--text-secondary)', marginTop: '0.5rem' }}>* Comment required to override AI classification.</p>
                   )}
+                </div>
+              )}
+            </div>
+
+            <div className="card" style={{ marginTop: '1.5rem' }}>
+              <h2 className={styles.sectionTitle}>Audit Trail</h2>
+              {auditEvents.length === 0 ? (
+                <p style={{ color: 'var(--text-secondary)' }}>No audit events yet.</p>
+              ) : (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
+                  {auditEvents.map((event) => (
+                    <div key={String(event.id)} style={{ padding: '0.75rem', borderRadius: '8px', background: 'var(--bg-color)' }}>
+                      <div style={{ fontWeight: 600 }}>{String(event.action).replace(/_/g, ' ')}</div>
+                      {event.notes && (
+                        <div style={{ marginTop: '0.25rem', color: 'var(--text-secondary)' }}>{String(event.notes)}</div>
+                      )}
+                      <div style={{ marginTop: '0.5rem', fontSize: '0.85rem', color: 'var(--text-secondary)' }}>
+                        {new Date(String(event.created_at)).toLocaleString()}
+                      </div>
+                    </div>
+                  ))}
                 </div>
               )}
             </div>

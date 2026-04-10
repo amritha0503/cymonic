@@ -1,7 +1,8 @@
-import { NextResponse } from 'next/server';
+import { NextResponse, type NextRequest } from 'next/server';
 import { createClient } from '@supabase/supabase-js';
+import { createServerClient } from '@supabase/ssr';
 
-export async function POST(req: Request) {
+export async function POST(req: NextRequest) {
   try {
     const { claimId, newStatus, comment } = await req.json();
 
@@ -11,11 +12,35 @@ export async function POST(req: Request) {
 
     const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL ?? '';
     const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY ?? '';
-    if (!supabaseUrl || !serviceRoleKey) {
+    const anonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ?? '';
+    if (!supabaseUrl || !serviceRoleKey || !anonKey) {
       return NextResponse.json({ error: 'Missing server configuration' }, { status: 500 });
     }
 
+    const authSupabase = createServerClient(supabaseUrl, anonKey, {
+      cookies: {
+        get: (name) => req.cookies.get(name)?.value,
+        set: () => {},
+        remove: () => {},
+      },
+    });
+
+    const { data: authData } = await authSupabase.auth.getUser();
+    const user = authData?.user;
+    if (!user) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    }
+
     const supabase = createClient(supabaseUrl, serviceRoleKey);
+    const { data: profile } = await supabase
+      .from('profiles')
+      .select('role')
+      .eq('id', user.id)
+      .single();
+
+    if (profile?.role !== 'auditor') {
+      return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
+    }
 
     const { data, error } = await supabase
       .from('claims')
@@ -33,19 +58,20 @@ export async function POST(req: Request) {
        return NextResponse.json({ error: 'Update failed' }, { status: 500 });
     }
 
-    if (data?.employee_id) {
-      const message = `Manual override: claim ${String(data.id).slice(0, 8)} is ${String(newStatus).toUpperCase()}. Comment: ${comment}`;
-      const { error: notificationError } = await supabase
-        .from('notifications')
+    if (data?.id) {
+      await supabase
+        .from('audit_events')
         .insert({
-          employee_id: data.employee_id,
           claim_id: data.id,
-          message,
+          actor_type: 'auditor',
+          actor_id: user.id,
+          action: 'manual_override',
+          notes: comment,
+          policy_version_id: data.policy_version_id || null,
+          metadata: {
+            status: newStatus,
+          },
         });
-
-      if (notificationError) {
-        console.error('Notification insert failed', notificationError);
-      }
     }
 
     return NextResponse.json({ success: true, claim: data });

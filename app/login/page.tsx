@@ -81,8 +81,8 @@ export default function LoginPage() {
       }
 
       setError("Your account does not have a role assigned. Please contact admin.");
-    } catch (err: any) {
-      setError(err.message || "Login failed");
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Login failed");
     } finally {
       setLoading(false);
     }
@@ -108,8 +108,8 @@ export default function LoginPage() {
       }
 
       setMessage("Account created. Please check your email to confirm sign in.");
-    } catch (err: any) {
-      setError(err.message || "Registration failed");
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Registration failed");
     } finally {
       setLoading(false);
     }
@@ -137,8 +137,8 @@ export default function LoginPage() {
       setResetSent(true);
       setResetCooldown(30);
       setMessage("Password reset email sent. Check your inbox.");
-    } catch (err: any) {
-      setError(err.message || "Failed to send reset email");
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Failed to send reset email");
     } finally {
       setLoading(false);
     }

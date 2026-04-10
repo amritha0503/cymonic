@@ -19,6 +19,7 @@ serve(async (req: Request) => {
     
     // Webhook shape usually contains the new database record inside 'record'
     const claim = body.record || body;
+    const policyVersionOverride = body.policy_version_id || null;
     const { id: claimId, receipt_image_path, business_purpose } = claim;
 
     if (!receipt_image_path) {
@@ -49,24 +50,47 @@ serve(async (req: Request) => {
     const base64Image = btoa(binary);
 
     // 3. Extract OCR using Gemini Vision
-    const ocrRes = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_API_KEY}`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        contents: [{
-          parts: [
-            { text: "Extract: merchant, date, total, currency, line_items as JSON only." },
-            { inlineData: { mimeType: "image/jpeg", data: base64Image } }
-          ]
-        }],
-        generationConfig: {
-          responseMimeType: "application/json"
+    const ocrPrompt = {
+      contents: [{
+        parts: [
+          { text: "Extract: merchant, date, total, currency, line_items as JSON only." },
+          { inlineData: { mimeType: "image/jpeg", data: base64Image } }
+        ]
+      }]
+    };
+
+    const ocrModels = ["gemini-2.5-flash-image"];
+    const generateUrlBase = "https://generativelanguage.googleapis.com/v1beta/models";
+    let ocrData: any = null;
+    let ocrError: string | null = null;
+
+    for (const model of ocrModels) {
+      for (let attempt = 1; attempt <= 3; attempt += 1) {
+        const ocrRes = await fetch(`${generateUrlBase}/${model}:generateContent?key=${GEMINI_API_KEY}`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify(ocrPrompt)
+        });
+        ocrData = await ocrRes.json();
+        if (ocrRes.ok && !ocrData.error) {
+          ocrError = null;
+          break;
         }
-      })
-    });
-    const ocrData = await ocrRes.json();
+        ocrError = ocrData?.error?.message || `OCR failed (status ${ocrRes.status})`;
+        if (attempt < 3 && (ocrRes.status === 429 || ocrRes.status >= 500)) {
+          await new Promise((resolve) => setTimeout(resolve, 750 * attempt));
+          continue;
+        }
+        break;
+      }
+      if (!ocrError) break;
+    }
+
+    if (ocrError) {
+      throw new Error(ocrError);
+    }
     const extractionResult = ocrData.candidates?.[0]?.content?.parts?.[0]?.text || '{}';
 
     // 4. Perform Vector Search for Policy via match_policy RPC
@@ -99,10 +123,24 @@ serve(async (req: Request) => {
     const norm = Math.sqrt(queryEmbedding.reduce((sum: number, v: number) => sum + v * v, 0));
     const normalizedEmbedding = norm > 0 ? queryEmbedding.map((v: number) => v / norm) : queryEmbedding;
 
+    let policyVersionId = policyVersionOverride;
+    if (!policyVersionId) {
+      const { data: activePolicy } = await supabase
+        .from('policy_versions')
+        .select('id')
+        .eq('is_active', true)
+        .order('created_at', { ascending: false })
+        .limit(1)
+        .single();
+
+      policyVersionId = activePolicy?.id || null;
+    }
+
     // Pass the real embedding into the `query_embedding` arg of match_policy
      const { data: policyChunks, error: rpcError } = await supabase.rpc('match_policy', {
        query_embedding: normalizedEmbedding,
-       match_count: 5 // Retrieve the top 5 most relevant policy chunks
+       match_count: 5, // Retrieve the top 5 most relevant policy chunks
+       p_policy_version_id: policyVersionId
     });
     
     if (rpcError) {
@@ -111,61 +149,92 @@ serve(async (req: Request) => {
     }
 
     // 5. Final Audit Verdict using Gemini
-    const verdictRes = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_API_KEY}`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        systemInstruction: {
-          parts: [{ text: `You are an expert Corporate Expense Auditor.
+    const verdictPayload = {
+      systemInstruction: {
+        parts: [{ text: `You are an expert Corporate Expense Auditor.
 Your job is to strictly evaluate the Receipt Data and Business Purpose against the provided Corporate Policy Chunks.
 1. Constraint Validation: Check the math for the actual specific expense type (e.g., Breakfast vs Lunch limit) using line items or total. If any limit is exceeded, or if prohibited items like alcohol exist, "reject" or "flag".
 2. Contextual Audit: Compare "Business Purpose" against receipt items. For example, if it says "Team Building" but has 1 meal, flag it.
 3. If no policy violations exist, status is "approved".
 Output strict JSON: { "status": "approved"|"flagged"|"rejected", "reason": "Generate a 1-sentence explanation citing the specific policy rule", "policy_excerpt": "string", "confidence": number_0_to_100 }` }]
-        },
-        contents: [{
-          parts: [{ text: `Receipt Data: ${extractionResult}\nPurpose: ${business_purpose}\nPolicy: ${JSON.stringify(policyChunks)}` }]
-        }],
-        generationConfig: {
-          responseMimeType: "application/json"
+      },
+      contents: [{
+        parts: [{ text: `Receipt Data: ${extractionResult}\nPurpose: ${business_purpose}\nPolicy: ${JSON.stringify(policyChunks)}` }]
+      }],
+      
+    };
+
+    const verdictModels = ["gemini-2.5-flash"];
+    let verdictData: any = null;
+    let verdictError: string | null = null;
+
+    for (const model of verdictModels) {
+      for (let attempt = 1; attempt <= 3; attempt += 1) {
+        const verdictRes = await fetch(`${generateUrlBase}/${model}:generateContent?key=${GEMINI_API_KEY}`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify(verdictPayload)
+        });
+        verdictData = await verdictRes.json();
+        if (verdictRes.ok && !verdictData.error) {
+          verdictError = null;
+          break;
         }
-      })
-    });
-    const verdictData = await verdictRes.json();
+        verdictError = verdictData?.error?.message || `Verdict failed (status ${verdictRes.status})`;
+        if (attempt < 3 && (verdictRes.status === 429 || verdictRes.status >= 500)) {
+          await new Promise((resolve) => setTimeout(resolve, 750 * attempt));
+          continue;
+        }
+        break;
+      }
+      if (!verdictError) break;
+    }
+
+    if (verdictError) {
+      throw new Error(verdictError);
+    }
     const verdictText = verdictData.candidates?.[0]?.content?.parts?.[0]?.text || '{}';
     const cleanJsonText = verdictText.replace(/```json/g, '').replace(/```/g, '').trim();
     const auditData = JSON.parse(cleanJsonText || '{}');
 
     // 6. Update the Claim table with the AI recommendation only
-    await supabase
+    const { error: claimUpdateError } = await supabase
       .from('claims')
       .update({
         ai_status: auditData.status,
         ai_reason: auditData.reason,
         policy_excerpt: auditData.policy_excerpt,
         ai_confidence: auditData.confidence,
+        policy_version_id: policyVersionId,
       })
       .eq('id', claimId);
 
-    // 7. Create a persistent notification for the employee dashboard
-    if (claim.employee_id && auditData.status) {
-      const statusLabel = String(auditData.status || "pending").toUpperCase();
-      const reasonText = auditData.reason ? ` Reason: ${auditData.reason}` : "";
-      const message = `AI status update: claim ${String(claimId).slice(0, 8)} is ${statusLabel}.${reasonText}`;
-      const { error: notificationError } = await supabase
-        .from('notifications')
-        .insert({
-          employee_id: claim.employee_id,
-          claim_id: claimId,
-          message,
-        });
-
-      if (notificationError) {
-        console.error("Notification insert failed", notificationError);
-      }
+    if (claimUpdateError) {
+      console.error('Claim update failed', claimUpdateError);
+      throw claimUpdateError;
     }
+
+    const { error: auditEventError } = await supabase
+      .from('audit_events')
+      .insert({
+        claim_id: claimId,
+        actor_type: 'ai',
+        action: 'ai_verdict',
+        notes: auditData.reason || null,
+        policy_version_id: policyVersionId,
+        metadata: {
+          status: auditData.status,
+          confidence: auditData.confidence,
+        },
+      });
+
+    if (auditEventError) {
+      console.error('Audit event insert failed', auditEventError);
+    }
+
+    // 7. No notifications table in use; the client derives updates from claims.
 
     return new Response(JSON.stringify({ success: true, verdict: auditData }), {
       headers: { "Content-Type": "application/json" },

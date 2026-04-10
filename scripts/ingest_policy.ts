@@ -67,6 +67,33 @@ async function main() {
   const rawText = fs.readFileSync(filePath, 'utf-8');
   const chunks = chunkText(rawText);
 
+  const policyName = process.env.POLICY_VERSION_NAME || `Policy ${new Date().toISOString()}`;
+  const effectiveDate = process.env.POLICY_EFFECTIVE_DATE || null;
+  const setActive = (process.env.POLICY_SET_ACTIVE || 'true').toLowerCase() === 'true';
+
+  const { data: policyVersion, error: policyError } = await supabase
+    .from('policy_versions')
+    .insert({
+      name: policyName,
+      effective_date: effectiveDate,
+      source_filename: path.basename(filePath),
+      is_active: setActive,
+    })
+    .select()
+    .single();
+
+  if (policyError || !policyVersion) {
+    console.error('Failed to create policy version:', policyError?.message || policyError);
+    return;
+  }
+
+  if (setActive) {
+    await supabase
+      .from('policy_versions')
+      .update({ is_active: false })
+      .neq('id', policyVersion.id);
+  }
+
   console.log(`✂️  Split document into ${chunks.length} chunks.`);
 
   for (let i = 0; i < chunks.length; i++) {
@@ -80,7 +107,8 @@ async function main() {
         .insert({
           section_title: `Section part ${i+1}`,
           content: chunk,
-          embedding: embedding
+          embedding: embedding,
+          policy_version_id: policyVersion.id,
         });
 
       if (error) {

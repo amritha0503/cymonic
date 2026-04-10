@@ -9,13 +9,25 @@ import { supabase } from "@/lib/supabase";
 
 export default function FinanceDashboard() {
   const [filter, setFilter] = useState("all");
-  const [claims, setClaims] = useState<any[]>([]);
+  const [claims, setClaims] = useState<Record<string, unknown>[]>([]);
   const [loading, setLoading] = useState(true);
   const router = useRouter();
 
-  const getFinalStatus = (claim: any) => {
-    if (claim?.overridden_at && claim?.status) return claim.status;
-    return claim?.ai_status || 'pending';
+  const [policyVersions, setPolicyVersions] = useState<Record<string, unknown>[]>([]);
+  const [policyName, setPolicyName] = useState('');
+  const [policyEffectiveDate, setPolicyEffectiveDate] = useState('');
+  const [policyFile, setPolicyFile] = useState<File | null>(null);
+  const [reAuditStart, setReAuditStart] = useState('');
+  const [reAuditEnd, setReAuditEnd] = useState('');
+  const [reAuditVersionId, setReAuditVersionId] = useState('');
+  const [policyMessage, setPolicyMessage] = useState('');
+
+  const getFinalStatus = (claim: Record<string, unknown>) => {
+    const overriddenAt = claim.overridden_at as string | null | undefined;
+    const status = claim.status as string | null | undefined;
+    const aiStatus = claim.ai_status as string | null | undefined;
+    if (overriddenAt && status) return status;
+    return aiStatus || 'pending';
   };
 
   useEffect(() => {
@@ -32,12 +44,26 @@ export default function FinanceDashboard() {
           (riskWeights[getFinalStatus(a)] || 5) - (riskWeights[getFinalStatus(b)] || 5) ||
           new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
         );
-        setClaims(sortedData);
+        setClaims(sortedData as Record<string, unknown>[]);
       }
       if (error) console.error("Error fetching claims:", error);
       setLoading(false);
     }
+    async function fetchPolicyVersions() {
+      const { data } = await supabase
+        .from('policy_versions')
+        .select('*')
+        .order('created_at', { ascending: false });
+      if (data) {
+        setPolicyVersions(data as Record<string, unknown>[]);
+        const active = data.find((version) => version.is_active);
+        if (active?.id) {
+          setReAuditVersionId(String(active.id));
+        }
+      }
+    }
     fetchClaims();
+    fetchPolicyVersions();
   }, []);
 
   const handleSignOut = async () => {
@@ -54,6 +80,71 @@ export default function FinanceDashboard() {
       case 'flagged': return <span className="badge badge-warning"><AlertCircle size={14} style={{marginRight: '4px'}}/> Flagged</span>;
       case 'rejected': return <span className="badge badge-danger"><XCircle size={14} style={{marginRight: '4px'}}/> Rejected</span>;
       default: return <span className="badge" style={{backgroundColor: 'var(--border-color)', color: 'var(--text-primary)'}}><Clock size={14} style={{marginRight: '4px'}}/> Pending</span>;
+    }
+  };
+
+  const handlePolicyUpload = async () => {
+    setPolicyMessage('');
+    if (!policyFile || !policyName) {
+      setPolicyMessage('Please provide a policy name and file.');
+      return;
+    }
+
+    const formData = new FormData();
+    formData.append('file', policyFile);
+    formData.append('name', policyName);
+    formData.append('effective_date', policyEffectiveDate);
+    formData.append('make_active', 'true');
+
+    const res = await fetch('/api/policy/upload', {
+      method: 'POST',
+      body: formData,
+    });
+
+    if (res.ok) {
+      setPolicyMessage('Policy uploaded and activated.');
+      setPolicyFile(null);
+      setPolicyName('');
+      setPolicyEffectiveDate('');
+      const { data } = await supabase
+        .from('policy_versions')
+        .select('*')
+        .order('created_at', { ascending: false });
+      if (data) {
+        setPolicyVersions(data as Record<string, unknown>[]);
+        const active = data.find((version) => version.is_active);
+        if (active?.id) {
+          setReAuditVersionId(String(active.id));
+        }
+      }
+    } else {
+      const payload = await res.json().catch(() => ({}));
+      setPolicyMessage(payload?.error || 'Failed to upload policy.');
+    }
+  };
+
+  const handleReAudit = async () => {
+    setPolicyMessage('');
+    if (!reAuditStart || !reAuditEnd) {
+      setPolicyMessage('Please choose a date range to re-audit.');
+      return;
+    }
+
+    const res = await fetch('/api/policy/re-audit', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        startDate: reAuditStart,
+        endDate: reAuditEnd,
+        policyVersionId: reAuditVersionId || undefined,
+      }),
+    });
+
+    const payload = await res.json().catch(() => ({}));
+    if (res.ok) {
+      setPolicyMessage(`Re-audit started for ${payload.processed || 0} claims.`);
+    } else {
+      setPolicyMessage(payload?.error || 'Failed to start re-audit.');
     }
   };
 
@@ -78,6 +169,82 @@ export default function FinanceDashboard() {
       </header>
 
       <main className="container wrapper" style={{ padding: '2rem 1.5rem' }}>
+        <div className="card" style={{ marginBottom: '1.5rem' }}>
+          <h2 style={{ marginBottom: '1rem' }}>Policy Versioning</h2>
+          <div style={{ display: 'grid', gap: '1rem', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))' }}>
+            <div>
+              <label style={{ display: 'block', marginBottom: '0.5rem' }}>Policy name</label>
+              <input
+                className="input-field"
+                value={policyName}
+                onChange={(e) => setPolicyName(e.target.value)}
+                placeholder="Q2 Policy Update"
+              />
+            </div>
+            <div>
+              <label style={{ display: 'block', marginBottom: '0.5rem' }}>Effective date</label>
+              <input
+                type="date"
+                className="input-field"
+                value={policyEffectiveDate}
+                onChange={(e) => setPolicyEffectiveDate(e.target.value)}
+              />
+            </div>
+            <div>
+              <label style={{ display: 'block', marginBottom: '0.5rem' }}>Policy file (.md, .txt, .pdf)</label>
+              <input
+                type="file"
+                className="input-field"
+                accept=".md,.txt,.pdf"
+                onChange={(e) => setPolicyFile(e.target.files?.[0] || null)}
+              />
+            </div>
+          </div>
+          <div style={{ display: 'flex', gap: '1rem', marginTop: '1rem', flexWrap: 'wrap' }}>
+            <button className="btn btn-primary" onClick={handlePolicyUpload}>Upload & Activate</button>
+          </div>
+
+          <div style={{ marginTop: '1.5rem', display: 'grid', gap: '1rem', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))' }}>
+            <div>
+              <label style={{ display: 'block', marginBottom: '0.5rem' }}>Re-audit start</label>
+              <input
+                type="date"
+                className="input-field"
+                value={reAuditStart}
+                onChange={(e) => setReAuditStart(e.target.value)}
+              />
+            </div>
+            <div>
+              <label style={{ display: 'block', marginBottom: '0.5rem' }}>Re-audit end</label>
+              <input
+                type="date"
+                className="input-field"
+                value={reAuditEnd}
+                onChange={(e) => setReAuditEnd(e.target.value)}
+              />
+            </div>
+            <div>
+              <label style={{ display: 'block', marginBottom: '0.5rem' }}>Policy version</label>
+              <select
+                className="input-field"
+                value={reAuditVersionId}
+                onChange={(e) => setReAuditVersionId(e.target.value)}
+              >
+                <option value="">Active policy</option>
+                {policyVersions.map((version) => (
+                  <option key={String(version.id)} value={String(version.id)}>
+                    {String(version.name)}{version.is_active ? ' (active)' : ''}
+                  </option>
+                ))}
+              </select>
+            </div>
+          </div>
+          <div style={{ display: 'flex', gap: '1rem', marginTop: '1rem', flexWrap: 'wrap' }}>
+            <button className="btn btn-secondary" onClick={handleReAudit}>Re-audit claims</button>
+            {policyMessage && <span style={{ color: 'var(--text-secondary)' }}>{policyMessage}</span>}
+          </div>
+        </div>
+
         <div className={styles.toolbar}>
           <div className={styles.searchBar}>
             <Search size={18} className={styles.searchIcon} />
@@ -124,7 +291,7 @@ export default function FinanceDashboard() {
                       <td>{claim.employee_name || 'N/A'}</td>
                       <td>{claim.date || new Date(claim.created_at).toLocaleDateString()}</td>
                       <td>{claim.merchant || 'N/A'}</td>
-                      <td style={{ fontWeight: 600 }}>${claim.amount || '0.00'}</td>
+                      <td style={{ fontWeight: 600 }}>Rs. {claim.amount || '0.00'}</td>
                       <td>{getStatusBadge(getFinalStatus(claim))}</td>
                       <td>
                         <Link href={`/finance/claims/${claim.id}`} className="btn btn-secondary" style={{ padding: '0.25rem 0.75rem', fontSize: '0.875rem' }}>

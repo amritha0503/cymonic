@@ -13,6 +13,7 @@ CREATE TABLE IF NOT EXISTS claims (
   merchant TEXT,
   business_purpose TEXT,
   receipt_image_path TEXT,
+  policy_version_id UUID,
   
   -- AI Auditor Fields
   status TEXT DEFAULT 'pending', -- 'pending', 'approved', 'flagged', 'rejected'
@@ -58,35 +59,72 @@ USING (
 -- with their respective vector embeddings for similarity search.
 CREATE TABLE IF NOT EXISTS policy_chunks (
   id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+  policy_version_id UUID,
   section_title TEXT,
   content TEXT NOT NULL,
   embedding VECTOR(768) -- Gemini embedding dimensions
 );
 
--- 4. Notifications Table
--- Stores per-employee notifications for manual overrides and status updates.
-CREATE TABLE IF NOT EXISTS notifications (
+-- Policy Versions Table
+CREATE TABLE IF NOT EXISTS policy_versions (
   id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
-  employee_id UUID NOT NULL,
-  claim_id UUID,
-  message TEXT NOT NULL,
+  name TEXT NOT NULL,
+  effective_date DATE,
+  source_filename TEXT,
+  is_active BOOLEAN DEFAULT FALSE,
   created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
-ALTER TABLE notifications ENABLE ROW LEVEL SECURITY;
+ALTER TABLE policy_versions ENABLE ROW LEVEL SECURITY;
 
--- Employees can read only their own notifications
-CREATE POLICY "Employees read own notifications"
-ON notifications
+-- Auditors can read policy versions
+CREATE POLICY "Auditors read policy versions"
+ON policy_versions
 FOR SELECT
-USING (auth.uid() = employee_id);
+USING (
+  EXISTS (
+    SELECT 1
+    FROM public.profiles p
+    WHERE p.id = auth.uid()
+      AND p.role = 'auditor'
+  )
+);
+
+-- Audit Events Table
+CREATE TABLE IF NOT EXISTS audit_events (
+  id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+  claim_id UUID NOT NULL,
+  actor_type TEXT NOT NULL, -- 'ai' | 'auditor'
+  actor_id UUID,
+  action TEXT NOT NULL,
+  notes TEXT,
+  metadata JSONB,
+  policy_version_id UUID,
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+ALTER TABLE audit_events ENABLE ROW LEVEL SECURITY;
+
+-- Auditors can read audit events
+CREATE POLICY "Auditors read audit events"
+ON audit_events
+FOR SELECT
+USING (
+  EXISTS (
+    SELECT 1
+    FROM public.profiles p
+    WHERE p.id = auth.uid()
+      AND p.role = 'auditor'
+  )
+);
 
 -- 3. Match Policy RPC (Remote Procedure Call)
 -- This is the Postgres Function Next.js or edge functions will call via `supabase.rpc('match_policy')`.
 -- It takes the vector embedding of the receipt + purpose and finds the closest policy rules.
 CREATE OR REPLACE FUNCTION match_policy (
   query_embedding VECTOR(768),
-  match_count INT DEFAULT 5
+  match_count INT DEFAULT 5,
+  p_policy_version_id UUID DEFAULT NULL
 ) RETURNS TABLE (
   id UUID,
   section_title TEXT,
@@ -103,6 +141,7 @@ BEGIN
     policy_chunks.content,
     1 - (policy_chunks.embedding <=> query_embedding) AS similarity
   FROM policy_chunks
+  WHERE (p_policy_version_id IS NULL OR policy_chunks.policy_version_id = p_policy_version_id)
   -- Only return somewhat relevant results (similarity > threshold if desired)
   ORDER BY policy_chunks.embedding <=> query_embedding
   LIMIT match_count;

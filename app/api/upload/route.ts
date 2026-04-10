@@ -1,13 +1,15 @@
-import { NextResponse } from 'next/server';
+import { NextResponse, type NextRequest } from 'next/server';
 import crypto from 'crypto';
 import { createClient } from '@supabase/supabase-js';
+import { createServerClient } from '@supabase/ssr';
+import { runLocalAudit } from '@/lib/local-audit';
 
 const supabaseAdmin = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
   process.env.SUPABASE_SERVICE_ROLE_KEY! // Bypasses RLS
 );
 
-export async function POST(req: Request) {
+export async function POST(req: NextRequest) {
   try {
     const formData = await req.formData();
     const file = formData.get('file') as File;
@@ -19,13 +21,32 @@ export async function POST(req: Request) {
     const employeeEmail = formData.get('employee_email') as string;
     const employeeName = formData.get('employee_name') as string;
     const employeeId = formData.get('employee_id') as string;
+    const ocrText = formData.get('ocr_text') as string | null;
 
     if (!file || !purpose) {
       return NextResponse.json({ error: 'Missing required fields' }, { status: 400 });
     }
 
-    if (!employeeId) {
-      return NextResponse.json({ error: 'Missing employee ID' }, { status: 400 });
+    const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL ?? '';
+    const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY ?? '';
+    const anonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ?? '';
+
+    if (!supabaseUrl || !serviceRoleKey || !anonKey) {
+      return NextResponse.json({ error: 'Server misconfigured' }, { status: 500 });
+    }
+
+    const authSupabase = createServerClient(supabaseUrl, anonKey, {
+      cookies: {
+        get: (name) => req.cookies.get(name)?.value,
+        set: () => {},
+        remove: () => {},
+      },
+    });
+
+    const { data: authData } = await authSupabase.auth.getUser();
+    const user = authData?.user;
+    if (!user) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
 
     const fileBuffer = Buffer.from(await file.arrayBuffer());
@@ -50,12 +71,22 @@ export async function POST(req: Request) {
     }
 
     // Insert database record
+    const { data: profile } = await supabaseAdmin
+      .from('profiles')
+      .select('username, role')
+      .eq('id', user.id)
+      .single();
+
+    if (profile?.role !== 'employee') {
+      return NextResponse.json({ error: 'Only employees can submit claims' }, { status: 403 });
+    }
+
     const { data: claimData, error: insertError } = await supabaseAdmin
       .from('claims')
       .insert({
-        employee_id: employeeId || null,
-        employee_email: employeeEmail || null,
-        employee_name: employeeName || null,
+        employee_id: user.id,
+        employee_email: user.email || employeeEmail || null,
+        employee_name: profile?.username || employeeName || null,
         business_purpose: purpose,
         date: date || new Date().toISOString().split('T')[0],
         merchant: merchant || 'Unknown',
@@ -71,21 +102,22 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: 'Failed to create claim record' }, { status: 500 });
     }
 
-    // Trigger Edge Function directly to ensure analysis runs even if webhook fails
-    const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
-    if (!serviceRoleKey) {
-      console.error('Missing SUPABASE_SERVICE_ROLE_KEY in server environment');
-      return NextResponse.json({ error: 'Server misconfigured: missing service role key' }, { status: 500 });
-    }
-    const { error: invokeError } = await supabaseAdmin.functions.invoke('audit-claim', {
-      body: { record: claimData },
-      headers: {
-        Authorization: `Bearer ${serviceRoleKey}`,
-        apikey: serviceRoleKey ?? ''
+    const groqKey = process.env.GROQ_API_KEY ?? '';
+    const model = process.env.GROQ_MODEL || 'llama-3.1-8b-instant';
+    if (groqKey) {
+      try {
+        await runLocalAudit({
+          supabase: supabaseAdmin,
+          claimId: claimData.id,
+          businessPurpose: purpose,
+          imageBuffer: fileBuffer,
+          groqKey,
+          model,
+          ocrText: ocrText || undefined,
+        });
+      } catch (auditError) {
+        console.error('Local audit failed:', auditError);
       }
-    });
-    if (invokeError) {
-      console.error('Edge Function invocation error:', invokeError);
     }
     
     return NextResponse.json({ success: true, path: storageData.path, claim: claimData });
